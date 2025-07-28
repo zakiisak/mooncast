@@ -39,6 +39,7 @@ class MoonlightAccessibilityService : AccessibilityService() {
     private var heartbeatRunnable: Runnable? = null
     private var desktopClickRetries = 0
     private val maxDesktopRetries = 3
+    private var sessionDialogCheckInProgress = false
     
     private val simpleBroadcastReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -337,10 +338,12 @@ class MoonlightAccessibilityService : AccessibilityService() {
                     Log.i(TAG, "✅ Successfully clicked OK button")
                     currentStep = ConnectionStep.FIND_HOST_BUTTON
                     
-                    // Wait for host list to load
+                    // Wait longer for screen transition and host list to fully load
+                    Log.i(TAG, "⏳ Waiting for host list screen to load completely...")
                     Handler(Looper.getMainLooper()).postDelayed({
-                        handleMoonlightWindow()
-                    }, 2000)
+                        // Verify we're actually on the host list screen before proceeding
+                        validateHostListScreenAndProceed()
+                    }, 4000) // Increased from 2000 to 4000ms
                 }
             } else {
                 Log.w(TAG, "⚠️ OK button not found")
@@ -350,13 +353,93 @@ class MoonlightAccessibilityService : AccessibilityService() {
         }
     }
     
+    private fun validateHostListScreenAndProceed() {
+        try {
+            Log.i(TAG, "🔍 Validating that we're on the host list screen...")
+            val rootNode = rootInActiveWindow
+            
+            if (rootNode == null) {
+                Log.w(TAG, "⚠️ No root node - retrying in 2 seconds...")
+                Handler(Looper.getMainLooper()).postDelayed({
+                    validateHostListScreenAndProceed()
+                }, 2000)
+                return
+            }
+            
+            // Check for indicators that we're on the host list screen
+            val allClickable = getAllClickableNodes(rootNode)
+            Log.e(TAG, "🔍 Screen validation - Found ${allClickable.size} clickable elements")
+            
+            // Ensure we're still in Moonlight app (not Chrome or other apps)
+            val packageName = rootNode.packageName?.toString() ?: ""
+            val isInMoonlight = packageName == "com.limelight"
+            
+            if (!isInMoonlight) {
+                Log.w(TAG, "⚠️ Not in Moonlight app (package: $packageName) - waiting to return...")
+                Handler(Looper.getMainLooper()).postDelayed({
+                    validateHostListScreenAndProceed()
+                }, 3000)
+                return
+            }
+            
+            // Look for GridView (hosts container) or PC name text
+            val hasGridView = allClickable.any { it.className?.contains("GridView") == true }
+            val hasHostText = findNodeByText(rootNode, targetHostName ?: "DESKTOP") != null
+            val hasSettingsButton = allClickable.any { 
+                it.className?.contains("ImageButton") == true && 
+                it.toString().contains("settingsButton")
+            }
+            
+            // More strict validation - require minimum elements AND proper content
+            val hasMinimumElements = allClickable.size >= 3
+            val hasProperContent = hasGridView && hasHostText
+            
+            Log.e(TAG, "🔍 Screen indicators: hasGridView=$hasGridView, hasHostText=$hasHostText, hasSettingsButton=$hasSettingsButton")
+            Log.e(TAG, "🔍 Validation: hasMinimumElements=$hasMinimumElements, hasProperContent=$hasProperContent, isInMoonlight=$isInMoonlight")
+            
+            if (hasProperContent && hasMinimumElements) {
+                Log.i(TAG, "✅ Confirmed on host list screen with proper content - proceeding with host button search")
+                handleMoonlightWindow()
+            } else if (hasSettingsButton) {
+                Log.w(TAG, "⚠️ Still seeing settings button - screen hasn't transitioned yet, waiting longer...")
+                Handler(Looper.getMainLooper()).postDelayed({
+                    validateHostListScreenAndProceed()
+                }, 3000)
+            } else if (!hasMinimumElements) {
+                Log.w(TAG, "⚠️ Too few clickable elements (${allClickable.size}) - screen still loading...")
+                Handler(Looper.getMainLooper()).postDelayed({
+                    validateHostListScreenAndProceed()
+                }, 2000)
+            } else if (!hasProperContent) {
+                Log.w(TAG, "⚠️ Missing GridView or host text - content not fully loaded...")
+                Handler(Looper.getMainLooper()).postDelayed({
+                    validateHostListScreenAndProceed()
+                }, 2000)
+            } else {
+                Log.i(TAG, "🤔 Uncertain screen state but trying anyway...")
+                handleMoonlightWindow()
+            }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error validating screen state", e)
+            // Fallback to original behavior
+            handleMoonlightWindow()
+        }
+    }
+    
     private fun findAndClickHostButton(rootNode: AccessibilityNodeInfo) {
         try {
             val hostName = targetHostName ?: HostStorage.getHostName(this, targetIP ?: "")
             
             if (hostName != null) {
                 Log.i(TAG, "🔍 Looking for host button with name: $hostName")
-                val hostButton = findNodeByText(rootNode, hostName)
+                
+                // Add comprehensive debugging to understand the current screen
+                Log.e(TAG, "=== FULL SCREEN ANALYSIS ===")
+                dumpFullScreenContents(rootNode)
+                Log.e(TAG, "=== END SCREEN ANALYSIS ===")
+                
+                val hostButton = findHostButtonSpecific(rootNode, hostName)
                 
                 if (hostButton != null) {
                     Log.i(TAG, "🎯 Found host button")
@@ -416,14 +499,106 @@ class MoonlightAccessibilityService : AccessibilityService() {
                     }
                 } else {
                     Log.w(TAG, "⚠️ Host button not found for: $hostName")
-                    // Let's also try finding all buttons for debugging
-                    Log.d(TAG, "🔍 Available buttons:")
-                    findAllButtons(rootNode).forEachIndexed { index, button ->
-                        Log.d(TAG, "  Button $index: text='${button.text}', desc='${button.contentDescription}'")
+                    
+                    // Try a more aggressive approach - just click the GridView or RelativeLayout
+                    Log.e(TAG, "🔄 FALLBACK: Trying to click containers directly...")
+                    val allClickable = getAllClickableNodes(rootNode)
+                    
+                    // Check if we're possibly on the wrong screen (settings screen) 
+                    val hasSettingsButton = allClickable.any { 
+                        it.toString().contains("settingsButton", ignoreCase = true) 
                     }
+                    
+                    if (hasSettingsButton) {
+                        Log.w(TAG, "⚠️ Detected settings button - we might be on wrong screen, waiting longer...")
+                        Handler(Looper.getMainLooper()).postDelayed({
+                            // Try to go back or wait for correct screen
+                            Log.i(TAG, "🔄 Retrying host button search after settings screen delay...")
+                            handleMoonlightWindow()
+                        }, 3000)
+                        return
+                    }
+                    
+                    // Try GridView first (common container for hosts)
+                    val gridView = allClickable.find { it.className?.contains("GridView") == true }
+                    if (gridView != null) {
+                        Log.e(TAG, "🎯 Found GridView, attempting click...")
+                        if (performEnhancedClick(gridView, "GridView Container")) {
+                            Log.i(TAG, "✅ Successfully clicked GridView container")
+                            currentStep = ConnectionStep.SELECT_DESKTOP
+                            Handler(Looper.getMainLooper()).postDelayed({
+                                handleMoonlightWindow()
+                            }, 1500)
+                            return
+                        }
+                    }
+                    
+                    // Try RelativeLayout second
+                    val relativeLayout = allClickable.find { it.className?.contains("RelativeLayout") == true }
+                    if (relativeLayout != null) {
+                        Log.e(TAG, "🎯 Found RelativeLayout, attempting click...")
+                        if (performEnhancedClick(relativeLayout, "RelativeLayout Container")) {
+                            Log.i(TAG, "✅ Successfully clicked RelativeLayout container")
+                            currentStep = ConnectionStep.SELECT_DESKTOP
+                            Handler(Looper.getMainLooper()).postDelayed({
+                                handleMoonlightWindow()
+                            }, 1500)
+                            return
+                        }
+                    }
+                    
+                    // Try clicking any non-ImageButton element as last resort
+                    val nonImageButton = allClickable.find { 
+                        !(it.className?.contains("ImageButton") == true)
+                    }
+                    if (nonImageButton != null) {
+                        Log.e(TAG, "🎯 Trying non-ImageButton as last resort...")
+                        if (performEnhancedClick(nonImageButton, "Last Resort Button")) {
+                            Log.i(TAG, "✅ Successfully clicked last resort button")
+                            currentStep = ConnectionStep.SELECT_DESKTOP
+                            Handler(Looper.getMainLooper()).postDelayed({
+                                handleMoonlightWindow()
+                            }, 1500)
+                            return
+                        }
+                    }
+                    
+                    Log.e(TAG, "❌ All fallback methods failed - might need to check if we're on the right screen")
+                    
+                    // Don't proceed to desktop selection if we have very few elements or wrong screen
+                    if (allClickable.size < 2) {
+                        Log.w(TAG, "⚠️ Too few clickable elements (${allClickable.size}) - screen not ready, waiting longer...")
+                        Handler(Looper.getMainLooper()).postDelayed({
+                            Log.i(TAG, "🔄 Retrying host button search after element loading delay...")
+                            handleMoonlightWindow()
+                        }, 3000)
+                        return
+                    }
+                    
+                    // Check if we're possibly on the wrong screen or if the host was already added
+                    val packageName = rootNode.packageName?.toString() ?: ""
+                    if (packageName != "com.limelight") {
+                        Log.w(TAG, "⚠️ Not in Moonlight app (package: $packageName) - waiting to return...")
+                        Handler(Looper.getMainLooper()).postDelayed({
+                            Log.i(TAG, "🔄 Retrying host button search after returning to Moonlight...")
+                            handleMoonlightWindow()
+                        }, 3000)
+                        return
+                    }
+                    
+                    Log.e(TAG, "🔍 Proceeding to Desktop selection as last resort...")
+                    currentStep = ConnectionStep.SELECT_DESKTOP
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        handleMoonlightWindow()
+                    }, 2000)
                 }
             } else {
-                Log.w(TAG, "⚠️ No host name available")
+                Log.w(TAG, "⚠️ No host name available - trying to proceed anyway")
+                // Even without host name, try to proceed
+                currentStep = ConnectionStep.SELECT_DESKTOP
+                Handler(Looper.getMainLooper()).postDelayed({
+                    handleMoonlightWindow()
+                }, 2000)
             }
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error finding host button", e)
@@ -432,6 +607,17 @@ class MoonlightAccessibilityService : AccessibilityService() {
     
     private fun selectDesktopOption(rootNode: AccessibilityNodeInfo) {
         try {
+            // Ensure we're still in Moonlight app (not Chrome or other apps)
+            val packageName = rootNode.packageName?.toString() ?: ""
+            if (packageName != "com.limelight") {
+                Log.w(TAG, "⚠️ Not in Moonlight app during Desktop selection (package: $packageName) - waiting to return...")
+                Handler(Looper.getMainLooper()).postDelayed({
+                    Log.i(TAG, "🔄 Retrying Desktop selection after returning to Moonlight...")
+                    handleMoonlightWindow()
+                }, 3000)
+                return
+            }
+            
             // Prevent excessive retries
             if (desktopClickRetries >= maxDesktopRetries) {
                 Log.e(TAG, "❌ Maximum Desktop click retries reached ($maxDesktopRetries), giving up")
@@ -700,6 +886,176 @@ class MoonlightAccessibilityService : AccessibilityService() {
         
         return null
     }
+    
+    private fun findHostButtonSpecific(node: AccessibilityNodeInfo, hostName: String): AccessibilityNodeInfo? {
+        // More specific host button detection to avoid settings buttons
+        val allClickable = getAllClickableNodes(node)
+        
+        Log.e(TAG, "🔍 SEARCHING FOR HOST BUTTON: '$hostName'")
+        Log.e(TAG, "🔍 Total clickable elements: ${allClickable.size}")
+        
+        // First, look for direct text matches
+        val hostCandidates = mutableListOf<AccessibilityNodeInfo>()
+        
+        // Check each clickable element and its children for host name
+        allClickable.forEachIndexed { index, candidate ->
+            val text = candidate.text?.toString() ?: ""
+            val desc = candidate.contentDescription?.toString() ?: ""
+            val className = candidate.className?.toString() ?: ""
+            
+            // Get all text from children (host name might be in child TextView)
+            val childTexts = getAllTextFromChildren(candidate)
+            val allTexts = childTexts.joinToString(" ")
+            
+            Log.e(TAG, "  📋 Candidate $index: text='$text', desc='$desc', class='$className'")
+            Log.e(TAG, "    📝 Child texts: '$allTexts'")
+            
+            // Check if this element or its children contain the host name
+            val directMatch = text.contains(hostName, ignoreCase = true) || 
+                             desc.contains(hostName, ignoreCase = true)
+            
+            val childMatch = allTexts.contains(hostName, ignoreCase = true)
+            
+            val containsHostName = directMatch || childMatch
+            
+            val isNotSettings = !text.contains("setting", ignoreCase = true) &&
+                              !text.contains("option", ignoreCase = true) &&
+                              !text.contains("menu", ignoreCase = true) &&
+                              !desc.contains("setting", ignoreCase = true) &&
+                              !desc.contains("option", ignoreCase = true) &&
+                              !desc.contains("menu", ignoreCase = true) &&
+                              !allTexts.contains("setting", ignoreCase = true) &&
+                              !allTexts.contains("menu", ignoreCase = true)
+            
+            val isRelevantClass = className.contains("Button") || 
+                                className.contains("TextView") ||
+                                className.contains("RelativeLayout") ||
+                                className.contains("LinearLayout") ||
+                                className.contains("GridView")
+            
+            if (containsHostName) {
+                Log.e(TAG, "    🎯 CONTAINS HOST NAME! directMatch=$directMatch, childMatch=$childMatch")
+                Log.e(TAG, "    🎯 isNotSettings=$isNotSettings, isRelevantClass=$isRelevantClass")
+                if (isNotSettings && isRelevantClass) {
+                    Log.e(TAG, "    ✅ ADDING TO CANDIDATES!")
+                    hostCandidates.add(candidate)
+                } else {
+                    Log.e(TAG, "    ❌ FILTERED OUT")
+                }
+            }
+        }
+        
+        Log.e(TAG, "🔍 Found ${hostCandidates.size} potential host buttons after text analysis")
+        
+        // If we found candidates with text matching, return the best one
+        if (hostCandidates.isNotEmpty()) {
+            // Prefer exact matches first
+            val exactMatch = hostCandidates.firstOrNull { candidate ->
+                val allTexts = getAllTextFromChildren(candidate)
+                allTexts.any { it.equals(hostName, ignoreCase = true) }
+            }
+            
+            if (exactMatch != null) {
+                Log.e(TAG, "✅ Found exact text match for host button")
+                return exactMatch
+            }
+            
+            Log.e(TAG, "✅ Using first partial match for host button")
+            return hostCandidates.first()
+        }
+        
+        // Fallback: If no text matches found, try position-based approach
+        Log.e(TAG, "⚠️ No text-based matches found, trying position-based fallback...")
+        
+        // In Moonlight, host buttons are often in a grid/list after the "+" button
+        // Try RelativeLayout and GridView elements (common containers for host buttons)
+        val containerCandidates = allClickable.filter { candidate ->
+            val className = candidate.className?.toString() ?: ""
+            className.contains("RelativeLayout") || className.contains("GridView")
+        }
+        
+        Log.e(TAG, "🔍 Found ${containerCandidates.size} container candidates for fallback")
+        
+        if (containerCandidates.isNotEmpty()) {
+            // Try the first container that might contain host buttons
+            Log.e(TAG, "🎯 Using first container as fallback host button")
+            return containerCandidates.first()
+        }
+        
+        // Last resort: Try any clickable element that's not an ImageButton
+        val nonImageButtons = allClickable.filter { candidate ->
+            val className = candidate.className?.toString() ?: ""
+            !className.contains("ImageButton")
+        }
+        
+        if (nonImageButtons.isNotEmpty()) {
+            Log.e(TAG, "🎯 Using first non-ImageButton as last resort")
+            return nonImageButtons.first()
+        }
+        
+        Log.e(TAG, "❌ No suitable host button candidates found")
+        return null
+    }
+    
+    private fun getAllTextFromChildren(node: AccessibilityNodeInfo): List<String> {
+        val texts = mutableListOf<String>()
+        
+        // Add this node's text if it exists
+        node.text?.toString()?.let { if (it.isNotEmpty()) texts.add(it) }
+        node.contentDescription?.toString()?.let { if (it.isNotEmpty()) texts.add(it) }
+        
+        // Recursively get text from all children
+        for (i in 0 until node.childCount) {
+            node.getChild(i)?.let { child ->
+                texts.addAll(getAllTextFromChildren(child))
+            }
+        }
+        
+        return texts
+    }
+    
+    private fun dumpFullScreenContents(node: AccessibilityNodeInfo, depth: Int = 0) {
+        try {
+            val indent = "  ".repeat(depth)
+            val text = node.text?.toString() ?: ""
+            val desc = node.contentDescription?.toString() ?: ""
+            val className = node.className?.toString() ?: ""
+            val clickable = node.isClickable
+            val enabled = node.isEnabled
+            val visible = node.isVisibleToUser
+            
+            Log.e(TAG, "${indent}📍 Node[d$depth]: class='$className'")
+            if (text.isNotEmpty()) Log.e(TAG, "${indent}   📝 text='$text'")
+            if (desc.isNotEmpty()) Log.e(TAG, "${indent}   📋 desc='$desc'")
+            Log.e(TAG, "${indent}   🎯 clickable=$clickable, enabled=$enabled, visible=$visible")
+            Log.e(TAG, "${indent}   👶 children=${node.childCount}")
+            
+            // Show bounds for clickable elements
+            if (clickable) {
+                try {
+                    val bounds = Rect()
+                    node.getBoundsInScreen(bounds)
+                    Log.e(TAG, "${indent}   📐 bounds=$bounds")
+                } catch (e: Exception) {
+                    Log.e(TAG, "${indent}   📐 bounds=ERROR")
+                }
+            }
+            
+            // Recursively dump children (but limit depth to avoid spam)
+            if (depth < 4) {
+                for (i in 0 until node.childCount) {
+                    node.getChild(i)?.let { child ->
+                        dumpFullScreenContents(child, depth + 1)
+                    }
+                }
+            } else if (node.childCount > 0) {
+                Log.e(TAG, "${indent}   ... ${node.childCount} more children (depth limit reached)")
+            }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error dumping node at depth $depth", e)
+        }
+    }
 
     private fun findAllButtons(node: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
         val buttons = mutableListOf<AccessibilityNodeInfo>()
@@ -740,70 +1096,8 @@ class MoonlightAccessibilityService : AccessibilityService() {
         allClickable.forEachIndexed { index, node ->
             Log.e(TAG, "  Clickable $index: text='${node.text}', desc='${node.contentDescription}', class='${node.className}'")
         }
-        
-        // Method 1: Look for exact "Desktop" text (not part of PC name)
-        Log.d(TAG, "🔍 Method 1: Looking for exact 'Desktop' text...")
-        for (node in allClickable) {
-            val text = node.text?.toString() ?: ""
-            val desc = node.contentDescription?.toString() ?: ""
-            
-            // Exact match for "Desktop" (case insensitive)
-            if (text.equals("Desktop", ignoreCase = true) || desc.equals("Desktop", ignoreCase = true)) {
-                Log.i(TAG, "✅ Found exact Desktop match: text='$text', desc='$desc'")
-                return node
-            }
-        }
-        
-        // Method 2: Look for "DESKTOP" standalone (not as part of hostname)
-        Log.d(TAG, "🔍 Method 2: Looking for standalone 'DESKTOP' text...")
-        for (node in allClickable) {
-            val text = node.text?.toString() ?: ""
-            val desc = node.contentDescription?.toString() ?: ""
-            
-            if (text.equals("DESKTOP", ignoreCase = true) || desc.equals("DESKTOP", ignoreCase = true)) {
-                Log.i(TAG, "✅ Found standalone DESKTOP match: text='$text', desc='$desc'")
-                return node
-            }
-        }
-        
-        // Method 3: Look in ALL nodes (not just clickable) for exact matches
-        Log.d(TAG, "🔍 Method 3: Scanning all nodes for Desktop options...")
-        val allDesktopNodes = findAllDesktopNodes(rootNode)
-        Log.e(TAG, "🔍 ALL NODES CONTAINING 'DESKTOP':")
-        allDesktopNodes.forEachIndexed { index, node ->
-            Log.e(TAG, "  Desktop Node $index: text='${node.text}', desc='${node.contentDescription}', clickable=${node.isClickable}, class='${node.className}'")
-        }
-        
-        // Try to find the clickable parent of a Desktop text node
-        for (node in allDesktopNodes) {
-            val text = node.text?.toString() ?: ""
-            if (text.equals("Desktop", ignoreCase = true) || text.equals("DESKTOP", ignoreCase = true)) {
-                // Check if this node or its parents are clickable
-                var current: AccessibilityNodeInfo? = node
-                var depth = 0
-                while (current != null && depth < 5) { // Check up to 5 levels up
-                    if (current.isClickable) {
-                        Log.i(TAG, "✅ Found clickable parent at depth $depth for Desktop text")
-                        return current
-                    }
-                    current = current.parent
-                    depth++
-                }
-            }
-        }
-        
-        // Method 4: Try ImageButtons by position (Desktop is likely the first one)
-        Log.d(TAG, "🔍 Method 4: Trying ImageButtons by position...")
-        val imageButtons = allClickable.filter { it.className == "android.widget.ImageButton" }
-        Log.e(TAG, "🔍 Found ${imageButtons.size} ImageButtons")
-        
-        if (imageButtons.isNotEmpty()) {
-            Log.i(TAG, "🎯 Attempting first ImageButton (likely Desktop based on layout)")
-            return imageButtons[0] // Desktop is on the left in the screenshot
-        }
-        
         // Method 5: Try RelativeLayouts (Desktop might be wrapped in a layout)
-        Log.d(TAG, "🔍 Method 5: Trying RelativeLayouts...")
+        Log.d(TAG, "🔍 Method 1: Trying RelativeLayouts...")
         val relativeLayouts = allClickable.filter { it.className == "android.widget.RelativeLayout" }
         Log.e(TAG, "🔍 Found ${relativeLayouts.size} RelativeLayouts")
         
@@ -835,60 +1129,329 @@ class MoonlightAccessibilityService : AccessibilityService() {
         return desktopNodes
     }
     
-    private fun checkForSessionDialog() {
+    private fun checkForSessionDialog(retryCount: Int = 0) {
         try {
-            Log.i(TAG, "🔍 Checking for session dialog after Desktop click...")
-            
-            val rootNode = rootInActiveWindow
-            if (rootNode == null) {
-                Log.w(TAG, "⚠️ No active window found for session dialog check")
-                // Assume streaming started directly (new session)
-                Log.i(TAG, "🎉 MOONLIGHT CONNECTION COMPLETED! (No dialog - direct start)")
-                currentStep = ConnectionStep.COMPLETED
-                desktopClickRetries = 0
+            // Prevent multiple simultaneous calls
+            if (sessionDialogCheckInProgress) {
+                Log.w(TAG, "⚠️ Session dialog check already in progress - skipping")
                 return
             }
             
-            // Look for session dialog options
+            sessionDialogCheckInProgress = true
+            Log.i(TAG, "🔍 Checking for session dialog after Desktop click... (attempt ${retryCount + 1}/3)")
+            
+            val rootNode = rootInActiveWindow
+            if (rootNode == null) {
+                if (retryCount < 2) {
+                    Log.w(TAG, "⚠️ No active window found - retrying in 2 seconds...")
+                    sessionDialogCheckInProgress = false // Clear flag before retry
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        checkForSessionDialog(retryCount + 1)
+                    }, 2000)
+                    return
+                } else {
+                    Log.w(TAG, "⚠️ No active window found after retries - assuming direct start")
+                    Log.i(TAG, "🎉 MOONLIGHT CONNECTION COMPLETED! (No dialog - direct start)")
+                    currentStep = ConnectionStep.COMPLETED
+                    desktopClickRetries = 0
+                    sessionDialogCheckInProgress = false
+                    return
+                }
+            }
+            
+            // Ensure we're still in Moonlight app
+            val packageName = rootNode.packageName?.toString() ?: ""
+            if (packageName != "com.limelight") {
+                if (retryCount < 2) {
+                    Log.w(TAG, "⚠️ Not in Moonlight app (package: $packageName) - waiting for dialog...")
+                    sessionDialogCheckInProgress = false // Clear flag before retry
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        checkForSessionDialog(retryCount + 1)
+                    }, 2000)
+                    return
+                } else {
+                    Log.i(TAG, "🎉 MOONLIGHT CONNECTION COMPLETED! (Switched to streaming app)")
+                    currentStep = ConnectionStep.COMPLETED
+                    desktopClickRetries = 0
+                    sessionDialogCheckInProgress = false
+                    return
+                }
+            }
+            
+            // Look for session dialog options with enhanced detection
             Log.d(TAG, "🔍 Scanning for session dialog options...")
             
-            // Check for "Resume Session" button
-            val resumeButton = findNodeByText(rootNode, "Resume Session")
-            if (resumeButton != null) {
-                Log.i(TAG, "🎯 Found 'Resume Session' button - attempting enhanced click methods")
+            // Get all clickable elements for session dialog analysis
+            val allClickable = getAllClickableNodes(rootNode)
+            Log.e(TAG, "🔍 SESSION DIALOG ANALYSIS - Found ${allClickable.size} clickable elements:")
+            allClickable.forEachIndexed { index, node ->
+                val text = node.text?.toString() ?: ""
+                val desc = node.contentDescription?.toString() ?: ""
+                val className = node.className?.toString() ?: ""
                 
-                // Use the same enhanced clicking approach as Desktop button
+                // Get all text from children for debugging
+                val childTexts = getAllTextFromChildren(node)
+                val allTexts = childTexts.joinToString(" | ")
+                
+                Log.e(TAG, "  [$index] text='$text', desc='$desc', class='$className'")
+                Log.e(TAG, "        childTexts: '$allTexts'")
+            }
+            
+            // Look for session dialog buttons with multiple approaches
+            var sessionButtonFound = false
+            
+            // Method 1: Look for "Resume Session" button (prioritize specific buttons over containers)
+            val resumeCandidates = allClickable.filter { node ->
+                val text = node.text?.toString() ?: ""
+                val desc = node.contentDescription?.toString() ?: ""
+                val className = node.className?.toString() ?: ""
+                
+                // Get all text from children (button text might be in child TextView)
+                val childTexts = getAllTextFromChildren(node)
+                val allTexts = childTexts.joinToString(" ")
+                
+                Log.d(TAG, "🔍 Checking resume candidate: text='$text', desc='$desc', class='$className', childTexts='$allTexts'")
+                
+                text.contains("resume", ignoreCase = true) || 
+                desc.contains("resume", ignoreCase = true) ||
+                text.contains("Resume Session", ignoreCase = true) ||
+                desc.contains("Resume Session", ignoreCase = true) ||
+                allTexts.contains("resume", ignoreCase = true) ||
+                allTexts.contains("Resume Session", ignoreCase = true)
+            }
+            
+            // Prioritize specific buttons over containers and those with exact text match
+            val resumeButtons = resumeCandidates.sortedWith(compareBy<AccessibilityNodeInfo> { node ->
+                val className = node.className?.toString() ?: ""
+                val childTexts = getAllTextFromChildren(node)
+                val hasExactResumeText = childTexts.any { it.equals("Resume Session", ignoreCase = true) }
+                val isContainer = className.contains("ListView")
+                
+                when {
+                    hasExactResumeText && className.contains("LinearLayout") -> 0    // Best: exact text + LinearLayout
+                    hasExactResumeText && !isContainer -> 1                          // Good: exact text, not container
+                    className.contains("LinearLayout") && !isContainer -> 2          // OK: LinearLayout, not container  
+                    className.contains("Button") -> 3                                // OK: explicit button
+                    !isContainer -> 4                                               // OK: not a container
+                    else -> 9                                                        // Last: containers (ListView etc)
+                }
+            })
+            
+            Log.e(TAG, "🎯 Found ${resumeButtons.size} potential Resume buttons")
+            resumeButtons.forEachIndexed { index, resumeButton ->
+                val className = resumeButton.className?.toString() ?: ""
+                Log.i(TAG, "🎯 Attempting Resume Session button $index (class: $className) - enhanced click methods")
+                
                 if (performEnhancedClick(resumeButton, "Resume Session")) {
-                    Log.i(TAG, "✅ Successfully clicked Resume Session")
-                    Log.i(TAG, "🎉 MOONLIGHT SESSION RESUMED! Streaming should start now.")
-                    currentStep = ConnectionStep.COMPLETED
-                    desktopClickRetries = 0
+                    Log.i(TAG, "✅ Successfully clicked Resume Session button $index")
+                    
+                    // Wait and verify the dialog was actually dismissed
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        val newRootNode = rootInActiveWindow
+                        if (newRootNode != null) {
+                            val newClickable = getAllClickableNodes(newRootNode)
+                            val stillHasDialog = newClickable.any { node ->
+                                val childTexts = getAllTextFromChildren(node)
+                                childTexts.any { it.contains("Resume Session", ignoreCase = true) }
+                            }
+                            
+                                                         if (!stillHasDialog) {
+                                 Log.i(TAG, "🎉 MOONLIGHT SESSION RESUMED! Dialog dismissed successfully.")
+                                 currentStep = ConnectionStep.COMPLETED
+                                 desktopClickRetries = 0
+                                 sessionDialogCheckInProgress = false
+                                 return@postDelayed
+                                                         } else {
+                                 Log.w(TAG, "⚠️ Resume Session button clicked but dialog still present - continuing search...")
+                                 // Don't clear the flag yet, let the method continue with other buttons/methods
+                             }
+                        }
+                    }, 1000)
+                    
+                    // Return early - let the handler validation determine success
                     return
                 } else {
-                    Log.w(TAG, "⚠️ Failed to click Resume Session button with all methods")
+                    Log.w(TAG, "⚠️ Failed to click Resume Session button $index, trying next...")
                 }
             }
             
-            // Check for "Start Session" or similar (new session)
-            val startButton = findNodeByText(rootNode, "Start Session") ?: 
-                             findNodeByText(rootNode, "Start") ?: 
-                             findNodeByText(rootNode, "Connect")
+            // Method 2: Look for "Start Session" or similar (new session)
+            val startCandidates = allClickable.filter { node ->
+                val text = node.text?.toString() ?: ""
+                val desc = node.contentDescription?.toString() ?: ""
+                
+                // Get all text from children (button text might be in child TextView)
+                val childTexts = getAllTextFromChildren(node)
+                val allTexts = childTexts.joinToString(" ")
+                
+                Log.d(TAG, "🔍 Checking start candidate: text='$text', desc='$desc', childTexts='$allTexts'")
+                
+                text.contains("start", ignoreCase = true) || 
+                desc.contains("start", ignoreCase = true) ||
+                text.contains("connect", ignoreCase = true) ||
+                desc.contains("connect", ignoreCase = true) ||
+                text.contains("ok", ignoreCase = true) ||
+                desc.contains("ok", ignoreCase = true) ||
+                allTexts.contains("start", ignoreCase = true) ||
+                allTexts.contains("connect", ignoreCase = true) ||
+                allTexts.contains("ok", ignoreCase = true) ||
+                allTexts.contains("Start Session", ignoreCase = true) ||
+                allTexts.contains("New Session", ignoreCase = true)
+            }
             
-            if (startButton != null) {
-                Log.i(TAG, "🎯 Found start session button - attempting enhanced click methods")
+            // Prioritize specific buttons over containers
+            val startButtons = startCandidates.sortedWith(compareBy<AccessibilityNodeInfo> { node ->
+                val className = node.className?.toString() ?: ""
+                val childTexts = getAllTextFromChildren(node)
+                val hasExactStartText = childTexts.any { 
+                    it.equals("Start Session", ignoreCase = true) || 
+                    it.equals("Start", ignoreCase = true) ||
+                    it.equals("Connect", ignoreCase = true)
+                }
+                val isContainer = className.contains("ListView")
+                
+                when {
+                    hasExactStartText && className.contains("LinearLayout") -> 0    // Best: exact text + LinearLayout
+                    hasExactStartText && !isContainer -> 1                          // Good: exact text, not container
+                    className.contains("LinearLayout") && !isContainer -> 2         // OK: LinearLayout, not container  
+                    className.contains("Button") -> 3                               // OK: explicit button
+                    !isContainer -> 4                                               // OK: not a container
+                    else -> 9                                                       // Last: containers (ListView etc)
+                }
+            })
+            
+            Log.e(TAG, "🎯 Found ${startButtons.size} potential Start/Connect buttons")
+            startButtons.forEachIndexed { index, startButton ->
+                val className = startButton.className?.toString() ?: ""
+                Log.i(TAG, "🎯 Attempting Start/Connect button $index (class: $className) - enhanced click methods")
+                
                 if (performEnhancedClick(startButton, "Start Session")) {
-                    Log.i(TAG, "✅ Successfully clicked start session button")
-                    Log.i(TAG, "🎉 MOONLIGHT NEW SESSION STARTED! Streaming should start now.")
-                    currentStep = ConnectionStep.COMPLETED
-                    desktopClickRetries = 0
+                    Log.i(TAG, "✅ Successfully clicked start session button $index")
+                    
+                    // Wait and verify the dialog was actually dismissed
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        val newRootNode = rootInActiveWindow
+                        if (newRootNode != null) {
+                            val newClickable = getAllClickableNodes(newRootNode)
+                            val stillHasDialog = newClickable.any { node ->
+                                val childTexts = getAllTextFromChildren(node)
+                                childTexts.any { it.contains("Start Session", ignoreCase = true) || 
+                                               it.contains("Resume Session", ignoreCase = true) }
+                            }
+                            
+                            if (!stillHasDialog) {
+                                Log.i(TAG, "🎉 MOONLIGHT NEW SESSION STARTED! Dialog dismissed successfully.")
+                                currentStep = ConnectionStep.COMPLETED
+                                desktopClickRetries = 0
+                                sessionDialogCheckInProgress = false
+                                return@postDelayed
+                                                         } else {
+                                 Log.w(TAG, "⚠️ Start Session button clicked but dialog still present - continuing search...")
+                                 // Don't clear the flag yet, let the method continue with other buttons/methods
+                             }
+                        }
+                    }, 1000)
+                    
+                    // Return early - let the handler validation determine success
                     return
                 } else {
-                    Log.w(TAG, "⚠️ Failed to click start session button with all methods")
+                    Log.w(TAG, "⚠️ Failed to click start session button $index, trying next...")
                 }
             }
             
-            // If no dialog found, assume direct connection (some setups start immediately)
-            Log.d(TAG, "🔍 No session dialog found - checking if connection started directly")
+            // Method 3: Enhanced text-based search for common session patterns
+            Log.e(TAG, "🔄 METHOD 3: Enhanced pattern matching for session buttons")
+            val sessionPatterns = listOf(
+                "resume", "Resume", "RESUME",
+                "start", "Start", "START", 
+                "continue", "Continue", "CONTINUE",
+                "play", "Play", "PLAY",
+                "connect", "Connect", "CONNECT",
+                "ok", "OK", "Ok",
+                "yes", "YES", "Yes",
+                "proceed", "Proceed", "PROCEED"
+            )
+            
+                         for (pattern in sessionPatterns) {
+                 Log.d(TAG, "🔍 Searching for pattern: '$pattern'")
+                 val patternButtons = allClickable.filter { node ->
+                     val childTexts = getAllTextFromChildren(node)
+                     val nodeInfo = node.toString()
+                     
+                     // Check both child text and node properties
+                     val hasTextPattern = childTexts.any { it.contains(pattern, ignoreCase = false) }
+                     val hasIdPattern = nodeInfo.contains(pattern, ignoreCase = true)
+                     
+                     hasTextPattern || hasIdPattern
+                 }
+                 
+                 if (patternButtons.isNotEmpty()) {
+                     Log.e(TAG, "🎯 Found ${patternButtons.size} buttons with pattern '$pattern'")
+                     for (patternButton in patternButtons) {
+                         Log.i(TAG, "🎯 Trying pattern-matched button for '$pattern'")
+                         if (performEnhancedClick(patternButton, "Pattern Matched Session Button ($pattern)")) {
+                             Log.i(TAG, "✅ Successfully clicked session button with pattern '$pattern'")
+                             Log.i(TAG, "🎉 MOONLIGHT SESSION STARTED! (Pattern matching)")
+                             currentStep = ConnectionStep.COMPLETED
+                             desktopClickRetries = 0
+                             return
+                         }
+                     }
+                 }
+             }
+             
+             // Method 3.5: Look for Android dialog buttons (common button classes/IDs)
+             Log.e(TAG, "🔄 METHOD 3.5: Looking for Android dialog buttons")
+             val dialogButtons = allClickable.filter { node ->
+                 val nodeInfo = node.toString()
+                 val className = node.className?.toString() ?: ""
+                 
+                 // Common Android dialog button patterns
+                 className.contains("Button") || 
+                 nodeInfo.contains("android:id/button", ignoreCase = true) ||
+                 nodeInfo.contains("positiveButton", ignoreCase = true) ||
+                 nodeInfo.contains("negativeButton", ignoreCase = true) ||
+                 nodeInfo.contains("neutralButton", ignoreCase = true)
+             }
+             
+             Log.e(TAG, "🎯 Found ${dialogButtons.size} potential dialog buttons")
+             for (dialogButton in dialogButtons) {
+                 Log.i(TAG, "🎯 Trying dialog button")
+                 if (performEnhancedClick(dialogButton, "Dialog Button")) {
+                     Log.i(TAG, "✅ Successfully clicked dialog button")
+                     Log.i(TAG, "🎉 MOONLIGHT SESSION STARTED! (Dialog button)")
+                     currentStep = ConnectionStep.COMPLETED
+                     desktopClickRetries = 0
+                     return
+                 }
+             }
+            
+            // Method 4: Try clicking the first few clickable elements as a fallback
+            Log.e(TAG, "🔄 FALLBACK: Trying first 3 clickable elements as potential session buttons")
+            for (i in 0 until minOf(3, allClickable.size)) {
+                val fallbackButton = allClickable[i]
+                Log.i(TAG, "🎯 Trying fallback button $i")
+                if (performEnhancedClick(fallbackButton, "Fallback Session Button $i")) {
+                    Log.i(TAG, "✅ Successfully clicked fallback session button $i")
+                    Log.i(TAG, "🎉 MOONLIGHT SESSION STARTED! (Fallback method)")
+                    currentStep = ConnectionStep.COMPLETED
+                    desktopClickRetries = 0
+                    return
+                }
+            }
+            
+            // If no dialog buttons worked, retry or give up
+            if (retryCount < 2) {
+                Log.w(TAG, "⚠️ No session dialog buttons worked - retrying in 3 seconds... (attempt ${retryCount + 1}/3)")
+                sessionDialogCheckInProgress = false // Clear flag before retry
+                Handler(Looper.getMainLooper()).postDelayed({
+                    checkForSessionDialog(retryCount + 1)
+                }, 3000)
+                return
+            }
+            
+            // Final attempt: assume direct connection (some setups start immediately)
+            Log.d(TAG, "🔍 No session dialog buttons worked after retries - checking if connection started directly")
             
             // Wait a bit more and check if we're in streaming mode
             Handler(Looper.getMainLooper()).postDelayed({
@@ -898,14 +1461,17 @@ class MoonlightAccessibilityService : AccessibilityService() {
                     Log.i(TAG, "🎉 MOONLIGHT CONNECTION COMPLETED! (Direct connection - no dialog)")
                     currentStep = ConnectionStep.COMPLETED
                     desktopClickRetries = 0
+                    sessionDialogCheckInProgress = false
                 } else {
                     // Still in Moonlight app, might need more investigation
-                    Log.w(TAG, "⚠️ Still in Moonlight app - session dialog might not have been handled")
+                    Log.w(TAG, "⚠️ Still in Moonlight app after all attempts - session dialog might not have been handled")
                     showAvailableOptions(currentWindow)
                     
                     // Mark as completed anyway to prevent infinite loops
+                    Log.i(TAG, "🔄 Marking as completed to prevent infinite loops")
                     currentStep = ConnectionStep.COMPLETED
                     desktopClickRetries = 0
+                    sessionDialogCheckInProgress = false
                 }
             }, 2000)
             
@@ -914,6 +1480,7 @@ class MoonlightAccessibilityService : AccessibilityService() {
             // Mark as completed to prevent infinite loops
             currentStep = ConnectionStep.COMPLETED
             desktopClickRetries = 0
+            sessionDialogCheckInProgress = false
         }
     }
     
@@ -1047,17 +1614,73 @@ class MoonlightAccessibilityService : AccessibilityService() {
                         Log.e(TAG, "  Clickable $index: text='${node.text}', desc='${node.contentDescription}', class='${node.className}'")
                     }
                     
-                    // For Resume Session, try the first clickable element
-                    if (buttonName.contains("Resume") && allClickable.isNotEmpty()) {
-                        Log.i(TAG, "🎯 Attempting first clickable element for Resume Session")
-                        if (allClickable[0].performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                            Log.i(TAG, "✅ Successfully clicked $buttonName via position")
-                            return true
+                    // For session dialogs, try the first few clickable elements
+                    if (buttonName.contains("Resume") || buttonName.contains("Start") || buttonName.contains("Session")) {
+                        for (i in 0 until minOf(3, allClickable.size)) {
+                            Log.i(TAG, "🎯 Attempting clickable element $i for $buttonName")
+                            if (allClickable[i].performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                                Log.i(TAG, "✅ Successfully clicked $buttonName via position $i")
+                                return true
+                            }
                         }
                     }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Exception during position-based click", e)
+            }
+            
+            // Method 5: Try delayed click (sometimes UI needs time)
+            Log.d(TAG, "🔄 Method 5: Attempting delayed click for $buttonName...")
+            try {
+                Thread.sleep(1000) // Wait 1 second
+                val clickResult = button.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                Log.e(TAG, "🔄 Delayed click result: $clickResult")
+                if (clickResult) {
+                    Log.i(TAG, "✅ Successfully clicked $buttonName with delayed click")
+                    return true
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Exception during delayed click", e)
+            }
+            
+            // Method 6: Try clicking grandparent (sometimes button is nested deeply)
+            Log.d(TAG, "🔄 Method 6: Attempting grandparent click for $buttonName...")
+            try {
+                val parent = button.parent
+                val grandparent = parent?.parent
+                if (grandparent != null && grandparent.isClickable) {
+                    Log.d(TAG, "🔄 Grandparent is clickable, attempting grandparent click...")
+                    if (grandparent.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                        Log.i(TAG, "✅ Successfully clicked $buttonName via grandparent")
+                        return true
+                    } else {
+                        Log.w(TAG, "⚠️ Grandparent click failed for $buttonName")
+                    }
+                } else {
+                    Log.d(TAG, "🔍 Grandparent is null or not clickable for $buttonName")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Exception during grandparent click", e)
+            }
+            
+            // Method 7: Try all siblings (button might be in a container with other clickable siblings)
+            Log.d(TAG, "🔄 Method 7: Attempting sibling clicks for $buttonName...")
+            try {
+                val parent = button.parent
+                if (parent != null) {
+                    for (i in 0 until parent.childCount) {
+                        val sibling = parent.getChild(i)
+                        if (sibling != null && sibling.isClickable && sibling != button) {
+                            Log.d(TAG, "🔄 Trying clickable sibling $i...")
+                            if (sibling.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                                Log.i(TAG, "✅ Successfully clicked $buttonName via sibling $i")
+                                return true
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Exception during sibling click", e)
             }
             
             Log.w(TAG, "❌ All enhanced click methods failed for $buttonName")

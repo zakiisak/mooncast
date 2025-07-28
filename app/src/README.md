@@ -110,9 +110,9 @@ build-simple.bat
 2. **Launch Moonlight**: Opens the Moonlight app automatically  
 3. **Click Plus Button**: Finds and taps the "+" to add host
 4. **Enter IP Address**: Types the host PC's IP address
-5. **Find Host Button**: Locates and clicks the PC name button
+5. **Find Host Button**: Smart detection avoids settings buttons
 6. **Select Desktop**: Chooses "Desktop" streaming option
-7. **Handle Sessions**: Resumes paused sessions or starts new ones
+7. **Handle Sessions**: Enhanced resumption with 7 click methods
 
 ### 📡 **API Endpoints**
 - **`POST /cast`** - Start streaming session
@@ -156,6 +156,18 @@ python mooncast-controller.py
 - Open Android Studio or use `adb logcat | grep Moonlight`
 - Look for detailed step-by-step automation logs
 - The app has multiple fallback methods for unreliable UI elements
+
+### 🔴 **"Clicks Settings Instead of PC Button"**
+**SOLUTION**: Enhanced host button detection (now fixed)
+- **Smart filtering** avoids settings/menu buttons
+- **Explicit PC name matching** with fallback methods
+- **Detailed logging** shows which buttons are considered
+
+### 🔴 **"Resume Session Button Won't Click"**
+**SOLUTION**: Enhanced session dialog handling (now fixed)
+- **7 different click methods**: Standard, parent, focus, position, delayed, grandparent, sibling
+- **Multiple detection approaches**: Exact text, partial text, fallback elements
+- **Comprehensive logging** shows all attempted methods
 
 ### 🔴 **"App Keeps Getting Killed"**
 **SOLUTION**: Battery optimization settings
