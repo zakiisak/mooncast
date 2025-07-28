@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/accessibility_service_description"
+    android:packageNames="com.limelight"
+    android:accessibilityEventTypes="typeAllMask"
+    android:accessibilityFlags="flagDefault|flagReportViewIds|flagRequestTouchExplorationMode|flagIncludeNotImportantViews"
+    android:accessibilityFeedbackType="feedbackGeneric|feedbackSpoken"
+    android:notificationTimeout="50"
+    android:canRetrieveWindowContent="true"
+    android:canPerformGestures="true"
+    android:canRequestFilterKeyEvents="true"
+    android:settingsActivity="com.icurety.mooncast.MainActivity" /> 

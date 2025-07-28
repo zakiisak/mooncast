@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Mooncast</string>
+    <string name="accessibility_service_description">Allows Mooncast to automatically control Moonlight app for seamless streaming</string>
+</resources>

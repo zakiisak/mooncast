@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mooncast Controller</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #333;
+        }
+
+        .container {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            border-radius: 24px;
+            padding: 40px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            width: 100%;
+            max-width: 450px;
+            text-align: center;
+        }
+
+        .logo {
+            font-size: 48px;
+            margin-bottom: 16px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .title {
+            font-size: 28px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #2d3748;
+        }
+
+        .subtitle {
+            color: #718096;
+            margin-bottom: 32px;
+            font-size: 16px;
+        }
+
+        .input-group {
+            margin-bottom: 32px;
+        }
+
+        .input-label {
+            display: block;
+            text-align: left;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: #4a5568;
+            font-size: 14px;
+        }
+
+        .ip-input {
+            width: 100%;
+            padding: 16px 20px;
+            border: 2px solid #e2e8f0;
+            border-radius: 12px;
+            font-size: 18px;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            text-align: center;
+            background: #f7fafc;
+            transition: all 0.3s ease;
+            outline: none;
+        }
+
+        .ip-input:focus {
+            border-color: #667eea;
+            background: white;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .button-group {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .btn {
+            flex: 1;
+            padding: 16px 24px;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .btn-cast {
+            background: linear-gradient(135deg, #48bb78, #38a169);
+            color: white;
+            box-shadow: 0 4px 15px rgba(72, 187, 120, 0.3);
+        }
+
+        .btn-cast:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(72, 187, 120, 0.4);
+        }
+
+        .btn-stop {
+            background: linear-gradient(135deg, #f56565, #e53e3e);
+            color: white;
+            box-shadow: 0 4px 15px rgba(245, 101, 101, 0.3);
+        }
+
+        .btn-stop:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(245, 101, 101, 0.4);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+
+        .status {
+            padding: 12px 20px;
+            border-radius: 8px;
+            margin-top: 16px;
+            font-size: 14px;
+            font-weight: 500;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .status.show {
+            opacity: 1;
+        }
+
+        .status-success {
+            background: #c6f6d5;
+            color: #22543d;
+            border: 1px solid #9ae6b4;
+        }
+
+        .status-error {
+            background: #fed7d7;
+            color: #742a2a;
+            border: 1px solid #fc8181;
+        }
+
+        .status-loading {
+            background: #bee3f8;
+            color: #2a4365;
+            border: 1px solid #90cdf4;
+        }
+
+        .footer {
+            margin-top: 24px;
+            color: #a0aec0;
+            font-size: 12px;
+        }
+
+        .footer a:hover {
+            color: #667eea !important;
+            text-decoration: underline !important;
+        }
+
+        .ripple {
+            position: absolute;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.6);
+            transform: scale(0);
+            animation: ripple 0.6s linear;
+        }
+
+        @keyframes ripple {
+            to {
+                transform: scale(4);
+                opacity: 0;
+            }
+        }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid transparent;
+            border-top: 2px solid currentColor;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 8px;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">🌙</div>
+        <h1 class="title">Mooncast Controller</h1>
+        <p class="subtitle">Remote control for your streaming device</p>
+        
+        <div class="input-group">
+            <label class="input-label" for="ipAddress">Device IP Address</label>
+            <input 
+                type="text" 
+                id="ipAddress" 
+                class="ip-input" 
+                placeholder="192.168.1.100"
+                value=""
+            >
+        </div>
+
+        <div class="button-group">
+            <button class="btn btn-cast" id="castBtn">
+                🎮 Cast Desktop
+            </button>
+            <button class="btn btn-stop" id="stopBtn">
+                🛑 Stop Casting
+            </button>
+        </div>
+
+        <div class="status" id="status"></div>
+
+        <div class="footer">
+            Port 8080 • Mooncast v1.0<br>
+            <a href="https://github.com/LizardByte/Sunshine/releases" target="_blank" style="color: #a0aec0; text-decoration: none; font-size: 11px; margin-top: 4px; display: inline-block;">
+                📡 Download Sunshine (Host Software)
+            </a>
+        </div>
+    </div>
+
+    <script>
+        const ipInput = document.getElementById('ipAddress');
+        const castBtn = document.getElementById('castBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const status = document.getElementById('status');
+
+        // Load saved IP address
+        const savedIP = localStorage.getItem('mooncast_ip');
+        if (savedIP) {
+            ipInput.value = savedIP;
+        }
+
+        // Save IP address on change
+        ipInput.addEventListener('input', () => {
+            localStorage.setItem('mooncast_ip', ipInput.value);
+        });
+
+        // Button ripple effect
+        function createRipple(event) {
+            const button = event.currentTarget;
+            const ripple = document.createElement('span');
+            const rect = button.getBoundingClientRect();
+            const size = Math.max(rect.width, rect.height);
+            const x = event.clientX - rect.left - size / 2;
+            const y = event.clientY - rect.top - size / 2;
+            
+            ripple.style.width = ripple.style.height = size + 'px';
+            ripple.style.left = x + 'px';
+            ripple.style.top = y + 'px';
+            ripple.classList.add('ripple');
+            
+            button.appendChild(ripple);
+            
+            setTimeout(() => {
+                ripple.remove();
+            }, 600);
+        }
+
+        // Status display functions
+        function showStatus(message, type) {
+            status.className = `status ${type} show`;
+            status.innerHTML = message;
+        }
+
+        function hideStatus() {
+            status.classList.remove('show');
+        }
+
+        // Validate IP address
+        function isValidIP(ip) {
+            const ipRegex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+            return ipRegex.test(ip);
+        }
+
+        // HTTP request function
+        async function sendRequest(endpoint, action) {
+            const ip = ipInput.value.trim();
+            
+            if (!ip) {
+                showStatus('⚠️ Please enter an IP address', 'status-error');
+                return;
+            }
+
+            if (!isValidIP(ip)) {
+                showStatus('⚠️ Please enter a valid IP address', 'status-error');
+                return;
+            }
+
+            const url = `http://${ip}:8080${endpoint}`;
+            
+            try {
+                // Disable buttons and show loading
+                castBtn.disabled = true;
+                stopBtn.disabled = true;
+                showStatus(`<span class="loading-spinner"></span>Sending ${action} command...`, 'status-loading');
+
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        timestamp: Date.now(),
+                        source: 'desktop-controller'
+                    })
+                });
+
+                if (response.ok) {
+                    showStatus(`✅ ${action} command sent successfully!`, 'status-success');
+                } else {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+            } catch (error) {
+                console.error('Request failed:', error);
+                showStatus(`❌ Failed to send ${action} command: ${error.message}`, 'status-error');
+            } finally {
+                // Re-enable buttons
+                castBtn.disabled = false;
+                stopBtn.disabled = false;
+                
+                // Auto-hide status after 3 seconds
+                setTimeout(hideStatus, 3000);
+            }
+        }
+
+        // Event listeners
+        castBtn.addEventListener('click', (e) => {
+            createRipple(e);
+            sendRequest('/cast', 'Cast');
+        });
+
+        stopBtn.addEventListener('click', (e) => {
+            createRipple(e);
+            sendRequest('/stop', 'Stop');
+        });
+
+        // Enter key support
+        ipInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                castBtn.click();
+            }
+        });
+
+        // Auto-focus IP input
+        ipInput.focus();
+    </script>
+</body>
+</html> 
